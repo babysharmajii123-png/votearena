@@ -50,7 +50,6 @@ export default function PublicArena() {
     if (contestData.ends_at && new Date() > new Date(contestData.ends_at)) {
       setIsEnded(true);
       
-      // Trigger rewards if not already distributed
       if (!contestData.rewards_distributed) {
         contestData.rewards_distributed = true;
         
@@ -91,7 +90,7 @@ export default function PublicArena() {
       setTotalVotes(votesData.length);
     }
 
-    // 4. Check if user has already voted (Database sync for Google accounts + LocalStorage fallback for guests)
+    // 4. Check if user has already voted
     const { data: authData } = await supabase.auth.getUser();
     const currentUser = authData?.user;
     const token = localStorage.getItem("voter_token");
@@ -99,7 +98,6 @@ export default function PublicArena() {
     let existingVote = null;
 
     if (currentUser) {
-      // Check database for a vote tied to this Google Account
       const { data: userVote } = await supabase
         .from("votes")
         .select("option_id")
@@ -110,17 +108,18 @@ export default function PublicArena() {
       existingVote = userVote;
     }
 
-    // Fallback: Check local storage for guest voters
     const localVotedOption = localStorage.getItem(`voted_${contestData.id}`);
 
     if (existingVote) {
       setHasVoted(true);
       setSelectedId(existingVote.option_id);
-      // Keep local storage in sync as well
       localStorage.setItem(`voted_${contestData.id}`, existingVote.option_id);
     } else if (localVotedOption) {
       setHasVoted(true);
       setSelectedId(localVotedOption);
+    } else {
+      setHasVoted(false);
+      setSelectedId(null);
     }
 
     // Fetch earned badges for this user/token
@@ -199,14 +198,12 @@ export default function PublicArena() {
       .on(
         "postgres_changes",
         { event: "INSERT", schema: "public", table: "votes", filter: `contest_id=eq.${contest.id}` },
-        (payload: any) => {
-          const newVoteOptionId = payload.new.option_id;
-          setCounts((prev) => ({
-            ...prev,
-            [newVoteOptionId]: (prev[newVoteOptionId] || 0) + 1,
-          }));
-          setTotalVotes((prev) => prev + 1);
-        }
+        () => fetchArenaData()
+      )
+      .on(
+        "postgres_changes",
+        { event: "DELETE", schema: "public", table: "votes", filter: `contest_id=eq.${contest.id}` },
+        () => fetchArenaData()
       )
       .subscribe();
 
@@ -230,11 +227,9 @@ export default function PublicArena() {
       localStorage.setItem("voter_token", token);
     }
 
-    // Check if user is logged in via Google Auth
     const { data: authData } = await supabase.auth.getUser();
     const userId = authData?.user?.id || null;
 
-    // Insert vote with both voter_token and user_id
     const { error } = await supabase.from("votes").insert([
       { contest_id: contest.id, option_id: selectedId, voter_token: token, user_id: userId },
     ]);
@@ -260,7 +255,7 @@ export default function PublicArena() {
     const badgeData = badgeDataArray?.[0];
 
     if (badgeData) {
-      const { error: insertError } = await supabase.from("badge_awards").insert([{
+      await supabase.from("badge_awards").insert([{
         voter_token: token,
         anonymous_session_id: token,
         user_id: userId,
@@ -268,21 +263,55 @@ export default function PublicArena() {
         contest_id: contest.id,
         option_id: selectedId
       }]);
-      
-      if (!insertError) {
-        setEarnedBadges([badgeData]);
-      }
     }
 
     setHasVoted(true);
     localStorage.setItem(`voted_${contest.id}`, selectedId);
     setIsSubmitting(false);
+    fetchArenaData();
+  };
+
+  // REMOVE / UNDO VOTE LOGIC
+  const handleRemoveVote = async () => {
+    if (!hasVoted || isEnded || !contest) return;
+    setIsSubmitting(true);
+
+    const { data: authData } = await supabase.auth.getUser();
+    const currentUser = authData?.user;
+    const token = localStorage.getItem("voter_token");
+
+    let query = supabase.from("votes").delete().eq("contest_id", contest.id);
+
+    if (currentUser) {
+      query = query.eq("user_id", currentUser.id);
+    } else if (token) {
+      query = query.eq("voter_token", token);
+    } else {
+      setIsSubmitting(false);
+      return;
+    }
+
+    const { error } = await query;
+
+    if (error) {
+      alert("Failed to remove vote: " + error.message);
+      setIsSubmitting(false);
+      return;
+    }
+
+    // Clear local cache & reset component state
+    localStorage.removeItem(`voted_${contest.id}`);
+    setHasVoted(false);
+    setSelectedId(null);
+    setIsSubmitting(false);
+
+    // Refresh arena state
+    fetchArenaData();
   };
 
   if (isLoading) return <div className="min-h-screen flex items-center justify-center"><div className="animate-spin rounded-full h-10 w-10 border-rose-500 border-b-2"></div></div>;
   if (!contest) return <div className="text-white text-center mt-20">Arena not found.</div>;
 
-  // Determine Winner (Priority: Admin declared > Highest Vote Count)
   const declaredWinnerOption = options.find((o) => o.is_winner === true);
   const maxVotes = Math.max(...Object.values(counts), 0);
 
@@ -382,7 +411,7 @@ export default function PublicArena() {
         })}
       </div>
 
-      {/* Submit Vote Button */}
+      {/* Action Buttons */}
       {!hasVoted && !isEnded && (
         <button
           onClick={handleSubmitVote}
@@ -394,6 +423,16 @@ export default function PublicArena() {
           `}
         >
           {isSubmitting ? "Submitting..." : "Submit Vote"}
+        </button>
+      )}
+
+      {hasVoted && !isEnded && (
+        <button
+          onClick={handleRemoveVote}
+          disabled={isSubmitting}
+          className="w-full py-3 rounded-xl font-bold text-sm text-rose-400 border border-rose-500/30 bg-rose-500/10 hover:bg-rose-500/20 active:scale-95 transition-all mt-2"
+        >
+          {isSubmitting ? "Processing..." : "🔄 Undo / Remove My Vote"}
         </button>
       )}
 
