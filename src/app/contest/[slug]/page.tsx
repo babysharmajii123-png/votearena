@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { useParams } from "next/navigation";
-import { createClient } from "@/app/lib/supabase/client"; // Adjust path if needed
+import { createClient } from "@/app/lib/supabase/client";
 
 export default function PublicArena() {
   const params = useParams();
@@ -25,11 +25,9 @@ export default function PublicArena() {
   const [earnedBadges, setEarnedBadges] = useState<any[]>([]);
 
   useEffect(() => {
-    // Save the current arena slug to THIS TAB'S memory so the Navbar can find its way back
     if (slug) {
       sessionStorage.setItem("tab_active_arena", slug);
     }
-    
     fetchArenaData();
   }, [slug]);
 
@@ -48,24 +46,23 @@ export default function PublicArena() {
 
     setContest(contestData);
     
-    // 1. Check if time limit has passed immediately
+    // Check if time limit has passed immediately
     if (contestData.ends_at && new Date() > new Date(contestData.ends_at)) {
       setIsEnded(true);
       
-      // FAILSAFE: If the arena is over but rewards haven't been handed out yet, trigger them!
+      // Trigger rewards if not already distributed
       if (!contestData.rewards_distributed) {
-        contestData.rewards_distributed = true; // Stop it from looping locally
+        contestData.rewards_distributed = true;
         
         fetch("/api/rewards", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ contestId: contestData.id })
         }).then((res) => {
-          // ONLY refresh if the API successfully distributed the rewards!
           if (res.ok) {
             setTimeout(() => fetchArenaData(), 1500);
           } else {
-            console.error("API failed, stopping loop.");
+            console.error("Reward distribution API failed.");
           }
         });
       }
@@ -94,35 +91,64 @@ export default function PublicArena() {
       setTotalVotes(votesData.length);
     }
 
-    // 4. Check Local Storage for previous votes/badges
+    // 4. Check if user has already voted (Database sync for Google accounts + LocalStorage fallback for guests)
+    const { data: authData } = await supabase.auth.getUser();
+    const currentUser = authData?.user;
     const token = localStorage.getItem("voter_token");
-    const votedOption = localStorage.getItem(`voted_${contestData.id}`);
-    
-    if (votedOption) {
+
+    let existingVote = null;
+
+    if (currentUser) {
+      // Check database for a vote tied to this Google Account
+      const { data: userVote } = await supabase
+        .from("votes")
+        .select("option_id")
+        .eq("contest_id", contestData.id)
+        .eq("user_id", currentUser.id)
+        .maybeSingle();
+
+      existingVote = userVote;
+    }
+
+    // Fallback: Check local storage for guest voters
+    const localVotedOption = localStorage.getItem(`voted_${contestData.id}`);
+
+    if (existingVote) {
       setHasVoted(true);
-      setSelectedId(votedOption);
-      
-      if (token) {
-        const { data: badgeData } = await supabase
-          .from("badge_awards")
-          .select("badges(*)")
-          .eq("voter_token", token)
-          .eq("contest_id", contestData.id);
-          
-        if (badgeData) {
-          setEarnedBadges(badgeData.map((b: any) => b.badges));
-        }
+      setSelectedId(existingVote.option_id);
+      // Keep local storage in sync as well
+      localStorage.setItem(`voted_${contestData.id}`, existingVote.option_id);
+    } else if (localVotedOption) {
+      setHasVoted(true);
+      setSelectedId(localVotedOption);
+    }
+
+    // Fetch earned badges for this user/token
+    if (currentUser || token) {
+      let badgeQuery = supabase
+        .from("badge_awards")
+        .select("badges(*)")
+        .eq("contest_id", contestData.id);
+
+      if (currentUser) {
+        badgeQuery = badgeQuery.eq("user_id", currentUser.id);
+      } else if (token) {
+        badgeQuery = badgeQuery.eq("voter_token", token);
+      }
+
+      const { data: badgeData } = await badgeQuery;
+      if (badgeData) {
+        setEarnedBadges(badgeData.map((b: any) => b.badges));
       }
     }
 
     setIsLoading(false);
   };
 
-// Countdown Timer Logic
+  // Countdown Timer Logic
   useEffect(() => {
     if (!contest?.ends_at || isEnded) return;
 
-    // We extract the math into a reusable function
     const updateTimer = () => {
       const now = new Date().getTime();
       const end = new Date(contest.ends_at).getTime();
@@ -132,7 +158,6 @@ export default function PublicArena() {
         setIsEnded(true);
         setTimeLeft("00:00:00");
         
-        // 🏆 AUTOMATIC TIMER PAYOUT
         fetch("/api/rewards", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -141,7 +166,7 @@ export default function PublicArena() {
           if (res.ok) setTimeout(() => fetchArenaData(), 1500);
         });
 
-        return true; // Tells the interval to stop
+        return true;
       } else {
         const hours = Math.floor((distance % (1000 * 60 * 60 * 24)) / (1000 * 60 * 60));
         const minutes = Math.floor((distance % (1000 * 60 * 60)) / (1000 * 60));
@@ -150,15 +175,13 @@ export default function PublicArena() {
         setTimeLeft(
           `${hours.toString().padStart(2, '0')}:${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`
         );
-        return false; // Keeps the interval running
+        return false;
       }
     };
 
-    // 1. RUN IMMEDIATELY: This prevents the 1-second blank screen delay
     const timeIsUp = updateTimer();
     if (timeIsUp) return;
 
-    // 2. THEN START INTERVAL: Run it every second thereafter
     const timer = setInterval(() => {
       const done = updateTimer();
       if (done) clearInterval(timer);
@@ -207,14 +230,18 @@ export default function PublicArena() {
       localStorage.setItem("voter_token", token);
     }
 
-    // Insert the vote
+    // Check if user is logged in via Google Auth
+    const { data: authData } = await supabase.auth.getUser();
+    const userId = authData?.user?.id || null;
+
+    // Insert vote with both voter_token and user_id
     const { error } = await supabase.from("votes").insert([
-      { contest_id: contest.id, option_id: selectedId, voter_token: token },
+      { contest_id: contest.id, option_id: selectedId, voter_token: token, user_id: userId },
     ]);
 
     if (error) {
       if (error.code === '23505') {
-        alert("Wait! The database says this token already voted. Badge step skipped.");
+        alert("You have already voted in this arena!");
         setHasVoted(true);
       } else {
         alert("Vote Error: " + error.message);
@@ -223,7 +250,7 @@ export default function PublicArena() {
       return;
     }
 
-    // Award Badge
+    // Award Participation Badge
     const { data: badgeDataArray } = await supabase
       .from("badges")
       .select("*")
@@ -235,7 +262,8 @@ export default function PublicArena() {
     if (badgeData) {
       const { error: insertError } = await supabase.from("badge_awards").insert([{
         voter_token: token,
-        anonymous_session_id: token, 
+        anonymous_session_id: token,
+        user_id: userId,
         badge_id: badgeData.id,
         contest_id: contest.id,
         option_id: selectedId
@@ -254,7 +282,8 @@ export default function PublicArena() {
   if (isLoading) return <div className="min-h-screen flex items-center justify-center"><div className="animate-spin rounded-full h-10 w-10 border-rose-500 border-b-2"></div></div>;
   if (!contest) return <div className="text-white text-center mt-20">Arena not found.</div>;
 
-  // Calculate Winners if Ended
+  // Determine Winner (Priority: Admin declared > Highest Vote Count)
+  const declaredWinnerOption = options.find((o) => o.is_winner === true);
   const maxVotes = Math.max(...Object.values(counts), 0);
 
   return (
@@ -285,9 +314,9 @@ export default function PublicArena() {
           const optionCount = counts[option.id] || 0;
           const percentage = totalVotes > 0 ? Math.round((optionCount / totalVotes) * 100) : 0;
           
-          const isWinner = isEnded && optionCount === maxVotes && optionCount > 0;
+          const isWinner = isEnded && (declaredWinnerOption ? declaredWinnerOption.id === option.id : optionCount === maxVotes && optionCount > 0);
           const isLoser = isEnded && !isWinner;
-          const isIncorrectPick = isLoser && isSelected; // User voted for this, but it lost
+          const isIncorrectPick = isLoser && isSelected;
           
           return (
             <button
@@ -312,13 +341,13 @@ export default function PublicArena() {
                 />
               )}
 
-              {/* Circle Icon / Crown / X */}
+              {/* Circle Icon / Winner Crown */}
               <div className={`w-12 h-12 rounded-full flex items-center justify-center flex-shrink-0 border transition-colors
                 ${isWinner ? 'bg-yellow-500/20 border-yellow-400 text-2xl animate-bounce' : ''}
                 ${isIncorrectPick ? 'bg-red-500/20 border-red-500/50 text-xl' : ''}
                 ${!isWinner && !isIncorrectPick && isSelected ? 'bg-gradient-to-br from-rose-500 to-orange-500 border-rose-400' : ''}
                 ${!isWinner && !isIncorrectPick && !isSelected ? 'bg-gradient-to-br from-gray-700 to-gray-900 border-white/5' : ''}
-                ${!hasVoted && !isEnded && 'group-hover:from-rose-500 group-hover:to-orange-500'}
+                ${!hasVoted && !isEnded ? 'group-hover:from-rose-500 group-hover:to-orange-500' : ''}
               `}>
                 <span className="text-xl font-bold text-white">
                   {isWinner ? "👑" : (isIncorrectPick ? "❌" : (hasVoted && isSelected ? "✓" : option.name.charAt(0)))}
@@ -353,7 +382,7 @@ export default function PublicArena() {
         })}
       </div>
 
-      {/* Submit Button */}
+      {/* Submit Vote Button */}
       {!hasVoted && !isEnded && (
         <button
           onClick={handleSubmitVote}

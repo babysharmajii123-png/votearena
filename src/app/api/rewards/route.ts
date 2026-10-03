@@ -11,6 +11,7 @@ export async function POST(req: Request) {
     const { contestId } = await req.json();
     console.log(`🏆 Starting reward calculation for Arena: ${contestId}`);
 
+    // Fetch contest configuration
     const { data: contest, error: contestError } = await supabase
       .from("contests")
       .select("champion_badge_id, rewards_distributed, ends_at")
@@ -20,7 +21,7 @@ export async function POST(req: Request) {
     if (contestError || !contest) return NextResponse.json({ error: "Contest not found" });
 
     if (!contest.champion_badge_id) {
-      console.log("⚠️ No champion badge was assigned. Skipping.");
+      console.log("⚠️ No champion badge assigned to this arena. Skipping.");
       return NextResponse.json({ message: "No champion badge assigned." });
     }
 
@@ -29,18 +30,18 @@ export async function POST(req: Request) {
       return NextResponse.json({ message: "Already distributed." });
     }
 
-    // 🛡️ THE FIX: Fetch valid options first to prevent FK crashes from ghost votes
+    // Fetch options to check if admin declared a winner manually
     const { data: optionsData } = await supabase
       .from("options")
-      .select("id")
+      .select("id, is_winner")
       .eq("contest_id", contestId);
       
     const validOptionIds = optionsData?.map(o => o.id) || [];
 
-    // Fetch all votes
+    // Fetch votes (including voter_token and user_id)
     const { data: votes, error: votesError } = await supabase
       .from("votes")
-      .select("voter_token, option_id")
+      .select("voter_token, user_id, option_id")
       .eq("contest_id", contestId);
 
     if (votesError || !votes || votes.length === 0) {
@@ -48,7 +49,7 @@ export async function POST(req: Request) {
       return NextResponse.json({ message: "No votes cast." });
     }
 
-    // 🛡️ THE FIX: Filter out orphaned ghost votes (where the option was deleted)
+    // Filter out votes cast for deleted options
     const validVotes = votes.filter((v: any) => validOptionIds.includes(v.option_id));
 
     if (validVotes.length === 0) {
@@ -56,32 +57,38 @@ export async function POST(req: Request) {
       return NextResponse.json({ message: "No valid votes remaining." });
     }
 
-    // Calculate the actual winner from the valid votes
-    const voteCounts = validVotes.reduce((acc: any, vote: any) => {
-      acc[vote.option_id] = (acc[vote.option_id] || 0) + 1;
-      return acc;
-    }, {});
+    // Determine Winner: Check for Admin Override (is_winner === true) first, else fallback to max votes
+    const adminDeclaredWinner = optionsData?.find((o: any) => o.is_winner === true);
+    let winningOptionId = adminDeclaredWinner?.id;
 
-    const winningOptionId = Object.keys(voteCounts).reduce((a, b) => 
-      voteCounts[a] > voteCounts[b] ? a : b
-    );
-    console.log(`✅ Winning Option ID: ${winningOptionId}`);
+    if (!winningOptionId) {
+      const voteCounts = validVotes.reduce((acc: any, vote: any) => {
+        acc[vote.option_id] = (acc[vote.option_id] || 0) + 1;
+        return acc;
+      }, {});
 
-    // Map the rewards safely
+      winningOptionId = Object.keys(voteCounts).reduce((a, b) => 
+        voteCounts[a] > voteCounts[b] ? a : b
+      );
+    }
+
+    console.log(`✅ Official Winning Option ID: ${winningOptionId}`);
+
+    // Map winners and include both voter_token AND user_id
     const winningVoters = validVotes
       .filter((v: any) => String(v.option_id) === String(winningOptionId))
       .map((v: any) => ({
         voter_token: v.voter_token,
         anonymous_session_id: v.voter_token, 
+        user_id: v.user_id || null,
         badge_id: contest.champion_badge_id, 
         contest_id: contestId,
-        option_id: winningOptionId // REQUIRED by your database, now safely verified!
+        option_id: winningOptionId
       }));
 
     if (winningVoters.length > 0) {
       const { error: insertError } = await supabase.from("badge_awards").insert(winningVoters);
       if (insertError) {
-        // If it's the duplicate constraint (23505), another request beat us to it by a millisecond!
         if (insertError.code === '23505') {
           console.log("🛡️ Badges already minted by a concurrent request. Safe to ignore.");
           await supabase.from("contests").update({ rewards_distributed: true }).eq("id", contestId);
