@@ -200,11 +200,6 @@ export default function PublicArena() {
         { event: "INSERT", schema: "public", table: "votes", filter: `contest_id=eq.${contest.id}` },
         () => fetchArenaData()
       )
-      .on(
-        "postgres_changes",
-        { event: "DELETE", schema: "public", table: "votes", filter: `contest_id=eq.${contest.id}` },
-        () => fetchArenaData()
-      )
       .subscribe();
 
     return () => {
@@ -268,44 +263,6 @@ export default function PublicArena() {
     setHasVoted(true);
     localStorage.setItem(`voted_${contest.id}`, selectedId);
     setIsSubmitting(false);
-    fetchArenaData();
-  };
-
-  // REMOVE / UNDO VOTE LOGIC
-  const handleRemoveVote = async () => {
-    if (!hasVoted || isEnded || !contest) return;
-    setIsSubmitting(true);
-
-    const { data: authData } = await supabase.auth.getUser();
-    const currentUser = authData?.user;
-    const token = localStorage.getItem("voter_token");
-
-    let query = supabase.from("votes").delete().eq("contest_id", contest.id);
-
-    if (currentUser) {
-      query = query.eq("user_id", currentUser.id);
-    } else if (token) {
-      query = query.eq("voter_token", token);
-    } else {
-      setIsSubmitting(false);
-      return;
-    }
-
-    const { error } = await query;
-
-    if (error) {
-      alert("Failed to remove vote: " + error.message);
-      setIsSubmitting(false);
-      return;
-    }
-
-    // Clear local cache & reset component state
-    localStorage.removeItem(`voted_${contest.id}`);
-    setHasVoted(false);
-    setSelectedId(null);
-    setIsSubmitting(false);
-
-    // Refresh arena state
     fetchArenaData();
   };
 
@@ -411,7 +368,7 @@ export default function PublicArena() {
         })}
       </div>
 
-      {/* Action Buttons */}
+      {/* Submit Vote Button */}
       {!hasVoted && !isEnded && (
         <button
           onClick={handleSubmitVote}
@@ -426,14 +383,14 @@ export default function PublicArena() {
         </button>
       )}
 
+      {/* Gamified Success Message (Replaces the Undo Button) */}
       {hasVoted && !isEnded && (
-        <button
-          onClick={handleRemoveVote}
-          disabled={isSubmitting}
-          className="w-full py-3 rounded-xl font-bold text-sm text-rose-400 border border-rose-500/30 bg-rose-500/10 hover:bg-rose-500/20 active:scale-95 transition-all mt-2"
-        >
-          {isSubmitting ? "Processing..." : "🔄 Undo / Remove My Vote"}
-        </button>
+        <div className="mt-4 p-5 bg-emerald-500/10 border border-emerald-500/30 rounded-2xl text-center animate-in fade-in slide-in-from-bottom-4">
+          <h3 className="text-emerald-400 font-bold text-lg mb-1">Prediction Locked! 🎯</h3>
+          <p className="text-gray-300 text-sm leading-relaxed">
+            Your vote has been securely recorded. Wait for the arena to conclude. If your prediction is correct, a unique E-badge will be permanently added to your Trophy Cabinet!
+          </p>
+        </div>
       )}
 
       {/* Badges Display Section */}

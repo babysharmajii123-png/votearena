@@ -25,7 +25,7 @@ export default function EditArena({ params }: { params: Promise<{ slug: string }
 
   // Options State
   const [options, setOptions] = useState<any[]>([]);
-  const [newOptionName, setNewOptionName] = useState(""); // Changed to Name
+  const [newOptionName, setNewOptionName] = useState("");
 
   useEffect(() => {
     fetchContestData();
@@ -109,7 +109,6 @@ export default function EditArena({ params }: { params: Promise<{ slug: string }
     e.preventDefault();
     if (!newOptionName.trim() || !contestId) return;
 
-    // MATCHED DATABASE COLUMN 'name'
     const { data, error } = await supabase
       .from("options")
       .insert([{ contest_id: contestId, name: newOptionName }]) 
@@ -136,6 +135,26 @@ export default function EditArena({ params }: { params: Promise<{ slug: string }
     } else {
       alert(`${optionName} has been crowned the winner!`);
       fetchContestData(); 
+    }
+  };
+
+  // NEW: Admin Delete Option Logic
+  const handleDeleteOption = async (optionId: string, optionName: string) => {
+    const confirmDelete = window.confirm(
+      `Are you sure you want to delete "${optionName}"? \n\nWARNING: This will permanently remove this option and ALL votes associated with it.`
+    );
+    if (!confirmDelete) return;
+
+    const { error } = await supabase
+      .from("options")
+      .delete()
+      .eq("id", optionId);
+
+    if (error) {
+      alert("Failed to delete option: " + error.message);
+    } else {
+      // Instantly remove it from the screen without needing to reload
+      setOptions(options.filter((opt) => opt.id !== optionId));
     }
   };
 
@@ -206,18 +225,29 @@ export default function EditArena({ params }: { params: Promise<{ slug: string }
                 options.map((opt) => (
                   <div key={opt.id} className={`flex justify-between items-center p-4 rounded-xl border ${opt.is_winner ? 'bg-amber-500/20 border-amber-500/50' : 'bg-black/40 border-white/5'}`}>
                     <span className={`font-bold ${opt.is_winner ? 'text-amber-400' : 'text-white'}`}>
-                      {/* USING opt.name HERE */}
                       {opt.name} {opt.is_winner && " 👑 (Winner)"}
                     </span>
                     
-                    {!opt.is_winner && (
+                    {/* Wrapped buttons in a flex container for neat alignment */}
+                    <div className="flex items-center gap-2">
+                      {!opt.is_winner && (
+                        <button 
+                          onClick={() => handleDeclareWinner(opt.id, opt.name)}
+                          className="text-xs font-bold px-3 py-1.5 bg-amber-500/10 hover:bg-amber-500/20 text-amber-500 border border-amber-500/20 rounded transition-colors"
+                        >
+                          Crown Winner
+                        </button>
+                      )}
+                      
+                      {/* Delete Option Button */}
                       <button 
-                        onClick={() => handleDeclareWinner(opt.id, opt.name)}
-                        className="text-xs font-bold px-3 py-1.5 bg-amber-500/10 hover:bg-amber-500/20 text-amber-500 border border-amber-500/20 rounded transition-colors"
+                        onClick={() => handleDeleteOption(opt.id, opt.name)}
+                        className="text-xs font-bold px-3 py-1.5 bg-red-500/10 hover:bg-red-500/20 text-red-500 border border-red-500/20 rounded transition-colors"
+                        title="Delete option and all associated votes"
                       >
-                        Crown Winner
+                        Delete
                       </button>
-                    )}
+                    </div>
                   </div>
                 ))
               )}
